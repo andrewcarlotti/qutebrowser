@@ -35,6 +35,9 @@ from PyQt5.QtPrintSupport import QPrintPreviewDialog
 
 from qutebrowser.api import cmdutils, apitypes, message, config
 
+# FIXME should be part of qutebrowser.api?
+from qutebrowser.completion.models import miscmodels
+
 
 @cmdutils.register(name='reload')
 @cmdutils.argument('tab', value=cmdutils.Value.count_tab)
@@ -71,8 +74,10 @@ def _print_preview(tab: apitypes.Tab) -> None:
     tab.printing.check_preview_support()
     diag = QPrintPreviewDialog(tab)
     diag.setAttribute(Qt.WA_DeleteOnClose)
-    diag.setWindowFlags(diag.windowFlags() | Qt.WindowMaximizeButtonHint |
-                        Qt.WindowMinimizeButtonHint)
+    diag.setWindowFlags(
+        diag.windowFlags() |  # type: ignore[operator, arg-type]
+        Qt.WindowMaximizeButtonHint |
+        Qt.WindowMinimizeButtonHint)
     diag.paintRequested.connect(functools.partial(
         tab.printing.to_printer, callback=print_callback))
     diag.exec_()
@@ -311,3 +316,27 @@ def debug_trace(expr: str = "") -> None:
         eval('hunter.trace({})'.format(expr))
     except Exception as e:
         raise cmdutils.CommandError("{}: {}".format(e.__class__.__name__, e))
+
+
+@cmdutils.register()
+@cmdutils.argument('tab', value=cmdutils.Value.cur_tab)
+@cmdutils.argument('position', completion=miscmodels.inspector_position)
+def devtools(tab: apitypes.Tab,
+             position: apitypes.InspectorPosition = None) -> None:
+    """Toggle the developer tools (web inspector).
+
+    Args:
+        position: Where to open the devtools
+                  (right/left/top/bottom/window).
+    """
+    try:
+        tab.private_api.toggle_inspector(position)
+    except apitypes.InspectorError as e:
+        raise cmdutils.CommandError(e)
+
+
+@cmdutils.register(deprecated='Use :devtools instead')
+@cmdutils.argument('tab', value=cmdutils.Value.cur_tab)
+def inspector(tab: apitypes.Tab) -> None:
+    """Toggle the web inspector."""
+    devtools(tab)

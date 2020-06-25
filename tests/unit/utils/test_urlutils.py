@@ -98,6 +98,8 @@ def init_config(config_stub):
         'test': 'http://www.qutebrowser.org/?q={}',
         'test-with-dash': 'http://www.example.org/?q={}',
         'path-search': 'http://www.example.org/{}',
+        'quoted-path': 'http://www.example.org/{quoted}',
+        'unquoted': 'http://www.example.org/?{unquoted}',
         'DEFAULT': 'http://www.example.com/?q={}',
     }
 
@@ -286,8 +288,10 @@ def test_special_urls(url, special):
     ('blub testfoo', 'www.example.com', 'q=blub testfoo'),
     ('stripped ', 'www.example.com', 'q=stripped'),
     ('test-with-dash testfoo', 'www.example.org', 'q=testfoo'),
-    ('test/with/slashes', 'www.example.com', 'q=test%2Fwith%2Fslashes'),
+    ('test/with/slashes', 'www.example.com', 'q=test/with/slashes'),
     ('test path-search', 'www.qutebrowser.org', 'q=path-search'),
+    ('slash/and&amp', 'www.example.com', 'q=slash/and%26amp'),
+    ('unquoted one=1&two=2', 'www.example.org', 'one=1&two=2'),
 ])
 def test_get_search_url(config_stub, url, host, query, open_base_url):
     """Test _get_search_url().
@@ -301,6 +305,25 @@ def test_get_search_url(config_stub, url, host, query, open_base_url):
     url = urlutils._get_search_url(url)
     assert url.host() == host
     assert url.query() == query
+
+
+@pytest.mark.parametrize('open_base_url', [True, False])
+@pytest.mark.parametrize('url, host, path', [
+    ('path-search t/w/s', 'www.example.org', 't/w/s'),
+    ('quoted-path t/w/s', 'www.example.org', 't%2Fw%2Fs'),
+])
+def test_get_search_url_for_path_search(config_stub, url, host, path, open_base_url):
+    """Test _get_search_url_for_path_search().
+
+    Args:
+        url: The "URL" to enter.
+        host: The expected search machine host.
+        path: The expected path on that host that is requested.
+    """
+    config_stub.val.url.open_base_url = open_base_url
+    url = urlutils._get_search_url(url)
+    assert url.host() == host
+    assert url.path(options=QUrl.PrettyDecoded) == '/' + path
 
 
 @pytest.mark.parametrize('url, host', [
@@ -329,78 +352,101 @@ def test_get_search_url_invalid(url):
         urlutils._get_search_url(url)
 
 
-@pytest.mark.parametrize('is_url, is_url_no_autosearch, uses_dns, url', [
+@attr.s
+class UrlParams:
+
+    url = attr.ib()
+    is_url = attr.ib(True)
+    is_url_no_autosearch = attr.ib(True)
+    use_dns = attr.ib(True)
+    is_url_in_schemeless = attr.ib(False)
+
+
+@pytest.mark.parametrize('auto_search',
+                         ['dns', 'naive', 'schemeless', 'never'])
+@pytest.mark.parametrize('url_params', [
     # Normal hosts
-    (True, True, False, 'http://foobar'),
-    (True, True, False, 'localhost:8080'),
-    (True, True, True, 'qutebrowser.org'),
-    (True, True, True, ' qutebrowser.org '),
-    (True, True, False, 'http://user:password@example.com/foo?bar=baz#fish'),
-    (True, True, True, 'existing-tld.domains'),
+    UrlParams('http://foobar', use_dns=False, is_url_in_schemeless=True),
+    UrlParams('localhost:8080', use_dns=False, is_url_in_schemeless=True),
+    UrlParams('qutebrowser.org'),
+    UrlParams(' qutebrowser.org '),
+    UrlParams('http://user:password@example.com/foo?bar=baz#fish',
+              use_dns=False, is_url_in_schemeless=True),
+    UrlParams('existing-tld.domains'),
     # Internationalized domain names
-    (True, True, True, '\u4E2D\u56FD.\u4E2D\u56FD'),  # Chinese TLD
-    (True, True, True, 'xn--fiqs8s.xn--fiqs8s'),  # The same in punycode
+    UrlParams('\u4E2D\u56FD.\u4E2D\u56FD'),  # Chinese TLD
+    UrlParams('xn--fiqs8s.xn--fiqs8s'),  # The same in punycode
     # Encoded space in explicit url
-    (True, True, False, 'http://sharepoint/sites/it/IT%20Documentation/Forms/AllItems.aspx'),
+    UrlParams('http://sharepoint/sites/it/IT%20Documentation/Forms/AllItems.aspx', use_dns=False, is_url_in_schemeless=True),
     # IPs
-    (True, True, False, '127.0.0.1'),
-    (True, True, False, '::1'),
-    (True, True, True, '2001:41d0:2:6c11::1'),
-    (True, True, True, '[2001:41d0:2:6c11::1]:8000'),
-    (True, True, True, '94.23.233.17'),
-    (True, True, True, '94.23.233.17:8000'),
+    UrlParams('127.0.0.1', use_dns=False),
+    UrlParams('::1', use_dns=False),
+    UrlParams('2001:41d0:2:6c11::1'),
+    UrlParams('[2001:41d0:2:6c11::1]:8000'),
+    UrlParams('94.23.233.17'),
+    UrlParams('94.23.233.17:8000'),
     # Special URLs
-    (True, True, False, 'file:///tmp/foo'),
-    (True, True, False, 'about:blank'),
-    (True, True, False, 'qute:version'),
-    (True, True, False, 'qute://version'),
-    (True, True, False, 'localhost'),
+    UrlParams('file:///tmp/foo', use_dns=False, is_url_in_schemeless=True),
+    UrlParams('about:blank', use_dns=False, is_url_in_schemeless=True),
+    UrlParams('qute:version', use_dns=False, is_url_in_schemeless=True),
+    UrlParams('qute://version', use_dns=False, is_url_in_schemeless=True),
+    UrlParams('localhost', use_dns=False),
     # _has_explicit_scheme False, special_url True
-    (True, True, False, 'qute::foo'),
-    (True, True, False, 'qute:://foo'),
+    UrlParams('qute::foo', use_dns=False),
+    UrlParams('qute:://foo', use_dns=False),
     # Invalid URLs
-    (False, False, False, ''),
-    (False, True, False, 'onlyscheme:'),
-    (False, True, False, 'http:foo:0'),
+    UrlParams('', is_url=False, is_url_no_autosearch=False, use_dns=False),
+    UrlParams('onlyscheme:', is_url=False, use_dns=False),
+    UrlParams('http:foo:0', is_url=False, use_dns=False),
     # Not URLs
-    (False, True, False, 'foo bar'),  # no DNS because of space
-    (False, True, False, 'localhost test'),  # no DNS because of space
-    (False, True, False, 'another . test'),  # no DNS because of space
-    (False, True, True, 'foo'),
-    (False, True, False, 'this is: not a URL'),  # no DNS because of space
-    (False, True, False, 'foo user@host.tld'),  # no DNS because of space
-    (False, True, False, '23.42'),  # no DNS because bogus-IP
-    (False, True, False, '1337'),  # no DNS because bogus-IP
-    (False, True, True, 'deadbeef'),
-    (False, True, True, 'hello.'),
-    (False, True, False, 'site:cookies.com oatmeal raisin'),
-    (False, True, True, 'example.search_string'),
-    (False, True, True, 'example_search.string'),
+    UrlParams('foo bar', is_url=False, use_dns=False),  # no DNS b/c of space
+    UrlParams('localhost test', is_url=False, use_dns=False),  # no DNS b/c spc
+    UrlParams('another . test', is_url=False, use_dns=False),  # no DNS b/c spc
+    UrlParams('foo', is_url=False),
+    UrlParams('this is: not a URL', is_url=False, use_dns=False),  # no DNS spc
+    UrlParams('foo user@host.tld', is_url=False, use_dns=False),  # no DNS, spc
+    UrlParams('23.42', is_url=False, use_dns=False),  # no DNS b/c bogus-IP
+    UrlParams('1337', is_url=False, use_dns=False),  # no DNS b/c bogus-IP
+    UrlParams('deadbeef', is_url=False),
+    UrlParams('hello.', is_url=False),
+    UrlParams('site:cookies.com oatmeal raisin', is_url=False, use_dns=False),
+    UrlParams('example.search_string', is_url=False),
+    UrlParams('example_search.string', is_url=False),
     # no DNS because there is no host
-    (False, True, False, 'foo::bar'),
+    UrlParams('foo::bar', is_url=False, use_dns=False),
     # Valid search term with autosearch
-    (False, False, False, 'test foo'),
-    (False, False, False, 'test user@host.tld'),
+    UrlParams('test foo', is_url=False,
+              is_url_no_autosearch=False, use_dns=False),
+    UrlParams('test user@host.tld', is_url=False,
+              is_url_no_autosearch=False, use_dns=False),
     # autosearch = False
-    (False, True, False, 'This is a URL without autosearch'),
-])
-@pytest.mark.parametrize('auto_search', ['dns', 'naive', 'never'])
-def test_is_url(config_stub, fake_dns,
-                is_url, is_url_no_autosearch, uses_dns, url, auto_search):
+    UrlParams('This is a URL without autosearch', is_url=False, use_dns=False),
+], ids=lambda param: 'URL: ' + param.url)
+def test_is_url(config_stub, fake_dns, auto_search, url_params):
     """Test is_url().
 
     Args:
-        is_url: Whether the given string is a URL with auto_search dns/naive.
-        is_url_no_autosearch: Whether the given string is a URL with
-                              auto_search false.
-        uses_dns: Whether the given string should fire a DNS request for the
-                  given URL.
-        url: The URL to test, as a string.
         auto_search: With which auto_search setting to test
+        url_params: instance of UrlParams; each containing the following attrs
+        * url: The URL to test, as a string.
+        * is_url: Whether the given string is considered a URL when auto_search
+                  is either dns or naive. [default: True]
+        * is_url_no_autosearch: Whether the given string is a URL with
+                                auto_search false. [default: True]
+        * use_dns: Whether the given string should fire a DNS request for the
+                   given URL. [default: True]
+        * is_url_in_schemeless: Whether the given string is treated as a URL
+                                when auto_search=schemeless. [default: False]
     """
+    url = url_params.url
+    is_url = url_params.is_url
+    is_url_no_autosearch = url_params.is_url_no_autosearch
+    use_dns = url_params.use_dns
+    is_url_in_schemeless = url_params.is_url_in_schemeless
+
     config_stub.val.url.auto_search = auto_search
     if auto_search == 'dns':
-        if uses_dns:
+        if use_dns:
             fake_dns.answer = True
             result = urlutils.is_url(url)
             assert fake_dns.used
@@ -415,6 +461,9 @@ def test_is_url(config_stub, fake_dns,
             result = urlutils.is_url(url)
             assert not fake_dns.used
             assert result == is_url
+    elif auto_search == 'schemeless':
+        assert urlutils.is_url(url) == is_url_in_schemeless
+        assert not fake_dns.used
     elif auto_search == 'naive':
         assert urlutils.is_url(url) == is_url
         assert not fake_dns.used
@@ -693,6 +742,9 @@ class TestProxyFromUrl:
     def test_proxy_from_url_valid(self, url, expected):
         assert urlutils.proxy_from_url(QUrl(url)) == expected
 
+    @pytest.mark.qt_log_ignore(
+        r'^QHttpNetworkConnectionPrivate::_q_hostLookupFinished could not '
+        r'de-queue request, failed to report HostNotFoundError')
     @pytest.mark.parametrize('scheme', ['pac+http', 'pac+https'])
     def test_proxy_from_url_pac(self, scheme, qapp):
         fetcher = urlutils.proxy_from_url(QUrl('{}://foo'.format(scheme)))

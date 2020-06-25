@@ -18,8 +18,6 @@ Feature: :spawn
         When I run :spawn -u /this_does_not_exist
         Then the error "Userscript '/this_does_not_exist' not found" should be shown
 
-    # https://github.com/qutebrowser/qutebrowser/issues/1614
-    @posix
     Scenario: Running :spawn with invalid quoting
         When I run :spawn ""'""
         Then the error "Error while splitting command: No closing quotation" should be shown
@@ -37,6 +35,14 @@ Feature: :spawn
         When I open data/title with spaces.html
         And I run :spawn (echo-exe) {url:pretty}
         Then "Executing * with args ['http://localhost:(port)/data/title with spaces.html'], userscript=False" should be logged
+
+    Scenario: Running :spawn with -m
+        When I run :spawn -m (echo-exe) Message 1
+        Then the message "Message 1" should be shown
+
+    Scenario: Running :spawn with -u -m
+        When I run :spawn -u -m (echo-exe) Message 2
+        Then the message "Message 2" should be shown
 
     @posix
     Scenario: Running :spawn with userscript

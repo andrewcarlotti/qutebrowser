@@ -21,8 +21,8 @@
 
 import enum
 import itertools
-import typing
 import functools
+import typing
 import time
 
 import attr
@@ -46,7 +46,7 @@ from qutebrowser.config import config
 from qutebrowser.utils import (utils, objreg, usertypes, log, qtutils,
                                urlutils, message)
 from qutebrowser.misc import miscwidgets, objects, sessions
-from qutebrowser.browser import eventfilter
+from qutebrowser.browser import eventfilter, inspector
 from qutebrowser.qt import sip
 
 if typing.TYPE_CHECKING:
@@ -72,7 +72,7 @@ def create(win_id: int,
     mode_manager = modeman.instance(win_id)
     if objects.backend == usertypes.Backend.QtWebEngine:
         from qutebrowser.browser.webengine import webenginetab
-        tab_class = webenginetab.WebEngineTab
+        tab_class = webenginetab.WebEngineTab  # type: typing.Type[AbstractTab]
     else:
         from qutebrowser.browser.webkit import webkittab
         tab_class = webkittab.WebKitTab
@@ -125,6 +125,7 @@ class TabData:
         fullscreen: Whether the tab has a video shown fullscreen currently.
         netrc_used: Whether netrc authentication was performed.
         input_mode: current input mode for the tab.
+        splitter: InspectorSplitter used to show inspector inside the tab.
     """
 
     keep_icon = attr.ib(False)  # type: bool
@@ -139,6 +140,7 @@ class TabData:
     netrc_used = attr.ib(False)  # type: bool
     input_mode = attr.ib(usertypes.KeyMode.normal)  # type: usertypes.KeyMode
     last_navigation = attr.ib(None)  # type: usertypes.NavigationRequest
+    splitter = attr.ib(None)  # type: miscwidgets.InspectorSplitter
 
     def should_show_icon(self) -> bool:
         return (config.val.tabs.favicons.show == 'always' or
@@ -318,6 +320,7 @@ class AbstractSearch(QObject):
     def search(self, text: str, *,
                ignore_case: usertypes.IgnoreCase = usertypes.IgnoreCase.never,
                reverse: bool = False,
+               wrap: bool = True,
                result_cb: _Callback = None) -> None:
         """Find the given text on the page.
 
@@ -325,6 +328,7 @@ class AbstractSearch(QObject):
             text: The text to search for.
             ignore_case: Search case-insensitively.
             reverse: Reverse search direction.
+            wrap: Allow wrapping at the top or bottom of the page.
             result_cb: Called with a bool indicating whether a match was found.
         """
         raise NotImplementedError
@@ -426,27 +430,36 @@ class AbstractZoom(QObject):
         self._set_factor_internal(self._zoom_factor)
 
 
+class SelectionState(enum.Enum):
+
+    """Possible states of selection in caret mode.
+
+    NOTE: Names need to line up with SelectionState in caret.js!
+    """
+
+    none = 1
+    normal = 2
+    line = 3
+
+
 class AbstractCaret(QObject):
 
     """Attribute ``caret`` of AbstractTab for caret browsing."""
 
     #: Signal emitted when the selection was toggled.
-    #: (argument - whether the selection is now active)
-    selection_toggled = pyqtSignal(bool)
+    selection_toggled = pyqtSignal(SelectionState)
     #: Emitted when a ``follow_selection`` action is done.
     follow_selected_done = pyqtSignal()
 
     def __init__(self,
-                 tab: 'AbstractTab',
                  mode_manager: modeman.ModeManager,
                  parent: QWidget = None) -> None:
         super().__init__(parent)
-        self._tab = tab
         self._widget = typing.cast(QWidget, None)
-        self.selection_enabled = False
         self._mode_manager = mode_manager
         mode_manager.entered.connect(self._on_mode_entered)
         mode_manager.left.connect(self._on_mode_left)
+        # self._tab is set by subclasses so mypy knows its concrete type.
 
     def _on_mode_entered(self, mode: usertypes.KeyMode) -> None:
         raise NotImplementedError
@@ -499,7 +512,7 @@ class AbstractCaret(QObject):
     def move_to_end_of_document(self) -> None:
         raise NotImplementedError
 
-    def toggle_selection(self) -> None:
+    def toggle_selection(self, line: bool = False) -> None:
         raise NotImplementedError
 
     def drop_selection(self) -> None:
@@ -541,7 +554,7 @@ class AbstractScroller(QObject):
 
     @pyqtSlot()
     def _log_scroll_pos_change(self) -> None:
-        log.webview.vdebug(  # type: ignore
+        log.webview.vdebug(  # type: ignore[attr-defined]
             "Scroll position changed to {}".format(self.pos_px()))
 
     def _init_widget(self, widget: QWidget) -> None:
@@ -688,9 +701,9 @@ class AbstractElements:
         [typing.Optional['webelem.AbstractWebElement']], None]
     _ErrorCallback = typing.Callable[[Exception], None]
 
-    def __init__(self, tab: 'AbstractTab') -> None:
+    def __init__(self) -> None:
         self._widget = typing.cast(QWidget, None)
-        self._tab = tab
+        # self._tab is set by subclasses so mypy knows its concrete type.
 
     def find_css(self, selector: str,
                  callback: _MultiCallback,
@@ -825,6 +838,37 @@ class AbstractTabPrivate:
     def shutdown(self) -> None:
         raise NotImplementedError
 
+    def run_js_sync(self, code: str) -> None:
+        """Run javascript sync.
+
+        Result will be returned when running JS is complete.
+        This is only implemented for QtWebKit.
+        For QtWebEngine, always raises UnsupportedOperationError.
+        """
+        raise NotImplementedError
+
+    def _recreate_inspector(self) -> None:
+        """Recreate the inspector when detached to a window.
+
+        This is needed to circumvent a QtWebEngine bug (which wasn't
+        investigated further) which sometimes results in the window not
+        appearing anymore.
+        """
+        self._tab.data.inspector = None
+        self.toggle_inspector(inspector.Position.window)
+
+    def toggle_inspector(self, position: inspector.Position) -> None:
+        """Show/hide (and if needed, create) the web inspector for this tab."""
+        tabdata = self._tab.data
+        if tabdata.inspector is None:
+            tabdata.inspector = inspector.create(
+                splitter=tabdata.splitter,
+                win_id=self._tab.win_id)
+            self._tab.shutting_down.connect(tabdata.inspector.shutdown)
+            tabdata.inspector.recreate.connect(self._recreate_inspector)
+            tabdata.inspector.inspect(self._widget.page())
+        tabdata.inspector.set_position(position)
+
 
 class AbstractTab(QWidget):
 
@@ -873,8 +917,18 @@ class AbstractTab(QWidget):
     # arg 1: The exit code.
     renderer_process_terminated = pyqtSignal(TerminationStatus, int)
 
-    def __init__(self, *, win_id: int, private: bool,
+    # Hosts for which a certificate error happened. Shared between all tabs.
+    #
+    # Note that we remember hosts here, without scheme/port:
+    # QtWebEngine/Chromium also only remembers hostnames, and certificates are
+    # for a given hostname anyways.
+    _insecure_hosts = set()  # type: typing.Set[str]
+
+    def __init__(self, *, win_id: int,
+                 mode_manager: modeman.ModeManager,
+                 private: bool,
                  parent: QWidget = None) -> None:
+        utils.unused(mode_manager)  # needed for mypy
         self.is_private = private
         self.win_id = win_id
         self.tab_id = next(tab_id_gen)
@@ -890,7 +944,6 @@ class AbstractTab(QWidget):
         self._layout = miscwidgets.WrapperLayout(self)
         self._widget = typing.cast(QWidget, None)
         self._progress = 0
-        self._has_ssl_errors = False
         self._load_status = usertypes.LoadStatus.none
         self._tab_event_filter = eventfilter.TabEventFilter(
             self, parent=self)
@@ -911,7 +964,8 @@ class AbstractTab(QWidget):
     def _set_widget(self, widget: QWidget) -> None:
         # pylint: disable=protected-access
         self._widget = widget
-        self._layout.wrap(self, widget)
+        self.data.splitter = miscwidgets.InspectorSplitter(widget)
+        self._layout.wrap(self, self.data.splitter)
         self.history._history = widget.history()
         self.history.private_api._history = widget.history()
         self.scroller._init_widget(widget)
@@ -957,7 +1011,7 @@ class AbstractTab(QWidget):
             log.webview.warning("Unable to find event target!")
             return
 
-        evt.posted = True
+        evt.posted = True  # type: ignore[attr-defined]
         QApplication.postEvent(recipient, evt)
 
     def navigation_blocked(self) -> bool:
@@ -982,7 +1036,6 @@ class AbstractTab(QWidget):
     @pyqtSlot()
     def _on_load_started(self) -> None:
         self._progress = 0
-        self._has_ssl_errors = False
         self.data.viewing_source = False
         self._set_load_status(usertypes.LoadStatus.loading)
         self.load_started.emit()
@@ -1041,15 +1094,19 @@ class AbstractTab(QWidget):
         Needs to be called by subclasses to trigger a load status update, e.g.
         as a response to a loadFinished signal.
         """
-        if ok and not self._has_ssl_errors:
-            if self.url().scheme() == 'https':
-                self._set_load_status(usertypes.LoadStatus.success_https)
-            else:
-                self._set_load_status(usertypes.LoadStatus.success)
-        elif ok:
-            self._set_load_status(usertypes.LoadStatus.warn)
+        url = self.url()
+        is_https = url.scheme() == 'https'
+
+        if not ok:
+            loadstatus = usertypes.LoadStatus.error
+        elif is_https and url.host() in self._insecure_hosts:
+            loadstatus = usertypes.LoadStatus.warn
+        elif is_https:
+            loadstatus = usertypes.LoadStatus.success_https
         else:
-            self._set_load_status(usertypes.LoadStatus.error)
+            loadstatus = usertypes.LoadStatus.success
+
+        self._set_load_status(loadstatus)
 
     @pyqtSlot()
     def _on_history_trigger(self, force_entry: bool = True) -> None:
@@ -1071,7 +1128,7 @@ class AbstractTab(QWidget):
         title_url = QUrl(url)
         title_url.setScheme('')
         title_url_str = title_url.toDisplayString(
-            QUrl.RemoveScheme)  # type: ignore
+            QUrl.RemoveScheme)  # type: ignore[arg-type]
         if title == title_url_str.strip('/'):
             title = ""
 
@@ -1209,7 +1266,8 @@ class AbstractTab(QWidget):
     def __repr__(self) -> str:
         try:
             qurl = self.url()
-            url = qurl.toDisplayString(QUrl.EncodeUnicode)  # type: ignore
+            url = qurl.toDisplayString(
+                QUrl.EncodeUnicode)  # type: ignore[arg-type]
         except (AttributeError, RuntimeError) as exc:
             url = '<{}>'.format(exc.__class__.__name__)
         else:
